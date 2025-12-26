@@ -1,10 +1,6 @@
-// This file has intentional linting errors to test the workflow
-const unusedVariable = "I'm not used"
-
+// This file has been fixed to pass linting
 function testFunction() {
-  console.log("This should trigger a no-console warning")
-  return "This uses double quotes which should fail"
+  return 'This uses single quotes which should pass';
 }
 
-// Missing semicolon at the end
-const anotherVariable = "No semicolon"
+const anotherVariable = 'With semicolon';
