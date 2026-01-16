@@ -1,0 +1,487 @@
+name: Pull Request Automation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        id: eslint
+        run: |
+          echo "## ESLint Results" >> eslint-results.txt
+          npm run lint 2>&1 | tee -a eslint-results.txt || echo "ESLINT_FAILED=true" >> $GITHUB_ENV
+          echo "ESLINT_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      - name: Run Prettier check
+        id: prettier
+        run: |
+          echo "## Prettier Results" >> prettier-results.txt
+          npx prettier --check "src/**/*.js" 2>&1 | tee -a prettier-results.txt || echo "PRETTIER_FAILED=true" >> $GITHUB_ENV
+          echo "PRETTIER_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      - name: Generate Code Quality Report
+        if: always()
+        run: |
+          {
+            echo "## Code Quality Report"
+            echo ""
+            echo "### ESLint"
+            if [ -f eslint-results.txt ]; then
+              cat eslint-results.txt
+            else
+              echo "✅ No ESLint issues found"
+            fi
+            echo ""
+            echo "### Prettier"
+            if [ -f prettier-results.txt ]; then
+              cat prettier-results.txt
+            else
+              echo "✅ All files are properly formatted"
+            fi
+          } > code-quality-report.md
+
+      - name: Post Code Quality Comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = '## Code Quality Report\n\n';
+            
+            // ESLint Results
+            report += '### ESLint\n';
+            if (fs.existsSync('eslint-results.txt')) {
+              const eslintContent = fs.readFileSync('eslint-results.txt', 'utf8');
+              if (process.env.ESLINT_EXIT_CODE === '0') {
+                report += '✅ **ESLint passed** - No issues found\n\n';
+                report += '```\n' + eslintContent + '\n```\n';
+              } else {
+                report += '❌ **ESLint failed** - Issues found\n\n';
+                report += '```\n' + eslintContent + '\n```\n';
+              }
+            } else {
+              report += '✅ **ESLint passed** - No issues found\n\n';
+            }
+            
+            // Prettier Results
+            report += '### Prettier\n';
+            if (fs.existsSync('prettier-results.txt')) {
+              const prettierContent = fs.readFileSync('prettier-results.txt', 'utf8');
+              if (process.env.PRETTIER_EXIT_CODE === '0') {
+                report += '✅ **Prettier passed** - All files properly formatted\n\n';
+                report += '```\n' + prettierContent + '\n```\n';
+              } else {
+                report += '❌ **Prettier failed** - Formatting issues found\n\n';
+                report += '```\n' + prettierContent + '\n```\n';
+              }
+            } else {
+              report += '✅ **Prettier passed** - All files properly formatted\n\n';
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        id: tests
+        run: |
+          echo "## Test Results" >> test-results.txt
+          npm run test:coverage 2>&1 | tee -a test-results.txt
+          echo "TEST_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      - name: Generate coverage summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "## Coverage Summary" > coverage-summary.md
+            echo "\n\`
+`
+" >> coverage-summary.md
+            node -e "
+              const fs = require('fs');
+              const summary = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8'));
+              const total = summary.total;
+              console.log('File      | % Stmts | % Branch | % Funcs | % Lines');
+              console.log('----------|---------|----------|---------|----------');
+              for (const [file, data] of Object.entries(summary)) {
+                if (file !== 'total') {
+                  const name = file.replace(/^.*[\\\/]/, '').substring(0, 9);
+                  console.log(
+
+test:0:"${name.padEnd(9)} | ${data.statements.pct.toString().padStart(7)} | ${data.branches.pct.toString().padStart(8)} | ${data.functions.pct.toString().padStart(7)} | ${data.lines.pct.toString().padStart(8)}
+");
+                }
+              }
+              console.log('----------|---------|----------|---------|----------');
+              console.log(
+
+test:1:"Total     | ${total.statements.pct.toString().padStart(7)} | ${total.branches.pct.toString().padStart(8)} | ${total.functions.pct.toString().padStart(7)} | ${total.lines.pct.toString().padStart(8)}
+");
+            " >> coverage-summary.md
+            echo "
+
+`
+`
+" >> coverage-summary.md
+          else
+            echo "## Coverage Summary" > coverage-summary.md
+            echo "No coverage report generated" >> coverage-summary.md
+          fi
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage/
+            test-results.txt
+          retention-days: 7
+
+      - name: Post Test Coverage Report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = '## Test Coverage Report\n\n';
+            
+            // Test Results
+            if (fs.existsSync('test-results.txt')) {
+              const testContent = fs.readFileSync('test-results.txt', 'utf8');
+              if (process.env.TEST_EXIT_CODE === '0') {
+                report += '✅ **All tests passed**\n\n';
+                report += '```\n' + testContent.substring(0, 2000) + '\n```\n';
+              } else {
+                report += '❌ **Tests failed**\n\n';
+                report += '```\n' + testContent.substring(0, 2000) + '\n```\n';
+              }
+            } else {
+              report += '⚠️ **Test results not available**\n\n';
+            }
+            
+            // Coverage Summary
+            if (fs.existsSync('coverage-summary.md')) {
+              const coverageContent = fs.readFileSync('coverage-summary.md', 'utf8');
+              report += coverageContent + '\n';
+            } else {
+              report += '⚠️ **Coverage summary not available**\n\n';
+            }
+            
+            report += '\n**Artifacts:** Coverage report has been uploaded as workflow artifact\n';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dependency vulnerability check
+        id: npm-audit
+        run: |
+          echo "## NPM Audit Results" > npm-audit-results.txt
+          npm audit --audit-level moderate 2>&1 | tee -a npm-audit-results.txt || echo "AUDIT_FAILED=true" >> $GITHUB_ENV
+          echo "AUDIT_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      - name: Check for secrets in code changes
+        id: secret-scan
+        run: |
+          echo "## Secret Scan Results" > secret-scan-results.txt
+          # Scan for common secret patterns
+          git diff HEAD~1..HEAD --name-only | while read file; do
+            if [ -f "$file" ]; then
+              echo "Scanning $file for secrets..." >> secret-scan-results.txt
+              grep -i -E "(password|secret|key|token|api[_-]?key|access[_-]?token)" "$file" >> secret-scan-results.txt 2>&1 || true
+            fi
+          done
+          echo "SECRET_SCAN_COMPLETED=true" >> $GITHUB_ENV
+
+      - name: Generate Security Scan Report
+        if: always()
+        run: |
+          {
+            echo "## Security Scan Report"
+            echo ""
+            echo "### Dependencies"
+            if [ -f npm-audit-results.txt ]; then
+              echo "#### Vulnerabilities"
+              cat npm-audit-results.txt
+            else
+              echo "✅ No vulnerabilities found"
+            fi
+            echo ""
+            echo "### Secrets Detection"
+            if [ -f secret-scan-results.txt ]; then
+              echo "#### Potential Secrets"
+              cat secret-scan-results.txt
+            else
+              echo "✅ No secrets detected"
+            fi
+          } > security-report.md
+
+      - name: Post Security Scan Report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = '## Security Scan Report\n\n';
+            
+            // NPM Audit Results
+            report += '### Dependencies\n';
+            report += '#### Vulnerabilities\n';
+            if (fs.existsSync('npm-audit-results.txt')) {
+              const auditContent = fs.readFileSync('npm-audit-results.txt', 'utf8');
+              if (process.env.AUDIT_EXIT_CODE === '0') {
+                report += '✅ **No vulnerabilities found** - All dependencies are secure\n\n';
+                report += '```\n' + auditContent + '\n```\n';
+              } else {
+                report += '⚠️ **Vulnerabilities detected** - Review required\n\n';
+                report += '```\n' + auditContent + '\n```\n';
+              }
+            } else {
+              report += '✅ **No vulnerabilities found**\n\n';
+            }
+            
+            // Secret Scan Results
+            report += '### Secrets Detection\n';
+            if (fs.existsSync('secret-scan-results.txt')) {
+              const secretContent = fs.readFileSync('secret-scan-results.txt', 'utf8');
+              if (secretContent.includes('password') || secretContent.includes('secret') || secretContent.includes('key')) {
+                report += '⚠️ **Potential secrets detected** - Manual review recommended\n\n';
+                report += '```\n' + secretContent.substring(0, 1000) + '\n```\n';
+              } else {
+                report += '✅ **No secrets detected** - Code appears safe\n\n';
+              }
+            } else {
+              report += '✅ **No secrets detected**\n\n';
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        id: build
+        run: |
+          echo "## Build Results" > build-results.txt
+          npm run build 2>&1 | tee -a build-results.txt
+          echo "BUILD_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      - name: Start application for validation
+        if: success()
+        run: |
+          npm start &
+          echo $! > app.pid
+          sleep 5
+
+      - name: Validate endpoints
+        if: success()
+        id: endpoint-validation
+        run: |
+          echo "## Endpoint Validation Results" > endpoint-results.txt
+          echo "Testing health endpoint..." >> endpoint-results.txt
+          curl -f http://localhost:3000/health 2>&1 | tee -a endpoint-results.txt && echo "HEALTH_CHECK_PASSED=true" >> $GITHUB_ENV || echo "HEALTH_CHECK_PASSED=false" >> $GITHUB_ENV
+          echo ""
+          echo "Testing root endpoint..." >> endpoint-results.txt
+          curl -f http://localhost:3000/ 2>&1 | tee -a endpoint-results.txt && echo "ROOT_CHECK_PASSED=true" >> $GITHUB_ENV || echo "ROOT_CHECK_PASSED=false" >> $GITHUB_ENV
+          echo "ENDPOINT_VALIDATION_COMPLETED=true" >> $GITHUB_ENV
+
+      - name: Stop application
+        if: always()
+        run: |
+          if [ -f app.pid ]; then
+            kill $(cat app.pid) 2>/dev/null || true
+            rm -f app.pid
+          fi
+
+      - name: Create deployment artifacts
+        if: success()
+        run: |
+          mkdir -p deployment-artifacts
+          cp -r src deployment-artifacts/
+          cp package*.json deployment-artifacts/
+          echo "DEPLOYMENT_ARTIFACTS_CREATED=true" >> $GITHUB_ENV
+
+      - name: Upload deployment artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-artifacts
+          path: deployment-artifacts/
+          retention-days: 7
+
+      - name: Generate Build Validation Report
+        if: always()
+        run: |
+          {
+            echo "## Build Validation"
+            echo ""
+            echo "### Build Process"
+            if [ -f build-results.txt ]; then
+              cat build-results.txt
+            else
+              echo "✅ Build completed successfully"
+            fi
+            echo ""
+            echo "### Endpoint Validation"
+            if [ "$HEALTH_CHECK_PASSED" = "true" ]; then
+              echo "✅ Health endpoint accessible"
+            else
+              echo "❌ Health endpoint failed"
+            fi
+            if [ "$ROOT_CHECK_PASSED" = "true" ]; then
+              echo "✅ Root endpoint accessible"
+            else
+              echo "❌ Root endpoint failed"
+            fi
+            echo ""
+            echo "### Deployment Artifacts"
+            if [ "$DEPLOYMENT_ARTIFACTS_CREATED" = "true" ]; then
+              echo "✅ Deployment artifacts created and uploaded"
+            else
+              echo "❌ Deployment artifacts not created"
+            fi
+          } > build-validation-report.md
+
+      - name: Post Build Validation Report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = '## Build Validation\n\n';
+            
+            // Build Results
+            report += '### Build Process\n';
+            if (fs.existsSync('build-results.txt')) {
+              const buildContent = fs.readFileSync('build-results.txt', 'utf8');
+              if (process.env.BUILD_EXIT_CODE === '0') {
+                report += '✅ **Build successful**\n\n';
+                report += '```\n' + buildContent + '\n```\n';
+              } else {
+                report += '❌ **Build failed**\n\n';
+                report += '```\n' + buildContent + '\n```\n';
+              }
+            } else {
+              report += '✅ **Build successful**\n\n';
+            }
+            
+            // Endpoint Validation
+            report += '### Endpoint Validation\n';
+            if (process.env.HEALTH_CHECK_PASSED === 'true') {
+              report += '✅ **Health endpoint** - Accessible and responding\n';
+            } else {
+              report += '❌ **Health endpoint** - Not accessible\n';
+            }
+            
+            if (process.env.ROOT_CHECK_PASSED === 'true') {
+              report += '✅ **Root endpoint** - Accessible and responding\n';
+            } else {
+              report += '❌ **Root endpoint** - Not accessible\n';
+            }
+            
+            report += '\n';
+            
+            // Deployment Artifacts
+            if (process.env.DEPLOYMENT_ARTIFACTS_CREATED === 'true') {
+              report += '✅ **Deployment artifacts** - Created and uploaded\n';
+            } else {
+              report += '❌ **Deployment artifacts** - Not created\n';
+            }
+            
+            report += '\n**Artifacts:** Deployment artifacts have been uploaded as workflow artifacts\n';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
